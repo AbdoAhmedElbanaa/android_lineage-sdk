@@ -8,6 +8,10 @@ package org.lineageos.platform.internal.display;
 import android.content.Context;
 import android.net.Uri;
 import android.os.Handler;
+import android.os.IBinder;
+import android.os.Parcel;
+import android.os.RemoteException;
+import android.os.ServiceManager;
 import android.text.TextUtils;
 import android.util.Range;
 import android.util.Slog;
@@ -96,11 +100,14 @@ public class PictureAdjustmentController extends LiveDisplayFeature {
 
     private void updatePictureAdjustment() {
         if (mUsePictureAdjustment && isScreenOn()) {
-            final HSIC hsic = getPictureAdjustment();
+            final HSIC hsic = getSavedPictureAdjustment();
             if (hsic != null) {
                 boolean ok;
                 try {
                     ok = mHardware.setPictureAdjustment(hsic);
+                    if (ok) {
+                        screenRefresh();
+                    }
                 } catch (RuntimeException e) {
                     Slog.e(TAG, "setPictureAdjustment threw", e);
                     ok = false;
@@ -108,6 +115,28 @@ public class PictureAdjustmentController extends LiveDisplayFeature {
                 if (!ok) {
                     Slog.e(TAG, "Failed to set picture adjustment! " + hsic.toString());
                 }
+            }
+        }
+    }
+
+    /**
+     * Tell SurfaceFlinger to repaint the screen so hardware register updates
+     * take immediate visual effect.
+     */
+    private void screenRefresh() {
+        Parcel data = null;
+        try {
+            final IBinder flinger = ServiceManager.getService("SurfaceFlinger");
+            if (flinger != null) {
+                data = Parcel.obtain();
+                data.writeInterfaceToken("android.ui.ISurfaceComposer");
+                flinger.transact(1004, data, null, 0);
+            }
+        } catch (RemoteException | RuntimeException ex) {
+            Slog.e(TAG, "Failed to refresh screen", ex);
+        } finally {
+            if (data != null) {
+                data.recycle();
             }
         }
     }
@@ -189,7 +218,17 @@ public class PictureAdjustmentController extends LiveDisplayFeature {
         }
     }
 
-    HSIC getPictureAdjustment() {
+    private boolean isValidHSIC(HSIC hsic) {
+        if (hsic == null || mRanges.size() < 4) {
+            return false;
+        }
+        return getHueRange().contains(hsic.getHue())
+                && getSaturationRange().contains(hsic.getSaturation())
+                && getIntensityRange().contains(hsic.getIntensity())
+                && getContrastRange().contains(hsic.getContrast());
+    }
+
+    private HSIC getSavedPictureAdjustment() {
         HSIC hsic = null;
         if (mUsePictureAdjustment) {
             hsic = getPAForMode(getCurrentModeId());
@@ -198,6 +237,20 @@ public class PictureAdjustmentController extends LiveDisplayFeature {
             hsic = new HSIC(0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
         }
         return hsic;
+    }
+
+    HSIC getPictureAdjustment() {
+        if (mUsePictureAdjustment) {
+            try {
+                final HSIC hwHsic = mHardware.getPictureAdjustment();
+                if (isValidHSIC(hwHsic)) {
+                    return hwHsic;
+                }
+            } catch (RuntimeException e) {
+                Slog.w(TAG, "getPictureAdjustment from hardware failed, using saved setting", e);
+            }
+        }
+        return getSavedPictureAdjustment();
     }
 
     boolean setPictureAdjustment(HSIC hsic) {
@@ -213,7 +266,7 @@ public class PictureAdjustmentController extends LiveDisplayFeature {
     private HSIC getPAForMode(int mode) {
         final SparseArray<HSIC> prefs = unpackPreference();
         final HSIC hsic = prefs.get(mode);
-        return hsic != null ? hsic : getDefaultPictureAdjustment();
+        return isValidHSIC(hsic) ? hsic : getDefaultPictureAdjustment();
     }
 
     private void setPAForMode(int mode, HSIC hsic) {

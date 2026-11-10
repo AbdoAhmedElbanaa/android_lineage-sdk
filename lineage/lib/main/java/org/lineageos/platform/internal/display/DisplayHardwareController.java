@@ -119,7 +119,7 @@ public class DisplayHardwareController extends LiveDisplayFeature {
         mMaxColor = maxColor;
 
         if (mUseColorAdjustment) {
-            copyColors(getColorAdjustment(), mColorAdjustment);
+            copyColors(getSavedColorAdjustment(), mColorAdjustment);
         }
     }
 
@@ -192,8 +192,8 @@ public class DisplayHardwareController extends LiveDisplayFeature {
             updateColorEnhancement();
         }
         if (uri == null || uri.equals(DISPLAY_COLOR_ADJUSTMENT)) {
-            copyColors(getColorAdjustment(), mColorAdjustment);
-            updateColorAdjustment();
+            copyColors(getSavedColorAdjustment(), mColorAdjustment);
+            updateColorAdjustment(uri != null);
         }
         if (uri == null || uri.equals(DISPLAY_ANTI_FLICKER)) {
             updateAntiFlicker();
@@ -287,6 +287,10 @@ public class DisplayHardwareController extends LiveDisplayFeature {
     }
 
     private synchronized void updateColorAdjustment() {
+        updateColorAdjustment(false);
+    }
+
+    private synchronized void updateColorAdjustment(boolean immediate) {
         if (!mUseColorAdjustment) {
             return;
         }
@@ -299,11 +303,29 @@ public class DisplayHardwareController extends LiveDisplayFeature {
         rgb[2] *= mAdditionalAdjustment[2];
 
         if (DEBUG) {
-            Slog.d(TAG, "updateColorAdjustment: " + Arrays.toString(rgb));
+            Slog.d(TAG, "updateColorAdjustment: " + Arrays.toString(rgb)
+                    + " immediate=" + immediate);
         }
 
         if (validateColors(rgb)) {
-            animateDisplayColor(rgb);
+            if (immediate && isScreenOn() && mMaxColor > 0) {
+                if (mAnimator != null) {
+                    mAnimator.cancel();
+                    mAnimator.removeAllUpdateListeners();
+                }
+                try {
+                    mHardware.setDisplayColorCalibration(new int[] {
+                            Math.round(rgb[0] * mMaxColor),
+                            Math.round(rgb[1] * mMaxColor),
+                            Math.round(rgb[2] * mMaxColor)
+                    });
+                    screenRefresh();
+                } catch (RuntimeException e) {
+                    Slog.e(TAG, "setDisplayColorCalibration failed", e);
+                }
+            } else {
+                animateDisplayColor(rgb);
+            }
         }
     }
 
@@ -527,7 +549,7 @@ public class DisplayHardwareController extends LiveDisplayFeature {
         return true;
     }
 
-    float[] getColorAdjustment() {
+    private float[] getSavedColorAdjustment() {
         if (!mUseColorAdjustment) {
             return getDefaultAdjustment();
         }
@@ -538,6 +560,32 @@ public class DisplayHardwareController extends LiveDisplayFeature {
             saveColorAdjustmentString(cur);
         }
         return cur;
+    }
+
+    float[] getColorAdjustment() {
+        if (!mUseColorAdjustment) {
+            return getDefaultAdjustment();
+        }
+        if ((mAnimator == null || !mAnimator.isRunning()) && mMaxColor > 0) {
+            try {
+                int[] hw = mHardware.getDisplayColorCalibration();
+                if (hw != null && hw.length >= 3) {
+                    float[] cur = new float[3];
+                    for (int i = 0; i < 3; i++) {
+                        float adj = mAdditionalAdjustment[i] > 0.0f ? mAdditionalAdjustment[i] : 1.0f;
+                        cur[i] = MathUtils.constrain(((float) hw[i] / (float) mMaxColor) / adj,
+                                0.0f, 1.0f);
+                    }
+                    if (validateColors(cur)) {
+                        copyColors(cur, mColorAdjustment);
+                        return cur;
+                    }
+                }
+            } catch (RuntimeException e) {
+                Slog.w(TAG, "getDisplayColorCalibration failed, falling back to saved setting", e);
+            }
+        }
+        return getSavedColorAdjustment();
     }
 
     boolean setColorAdjustment(float[] adj) {
